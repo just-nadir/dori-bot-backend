@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+gspread
+gspread-dataframe
+pandas
+python-dotenv
