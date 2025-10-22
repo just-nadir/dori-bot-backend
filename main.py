@@ -1,102 +1,73 @@
-import uvicorn  # Serverni ishga tushurish uchun
-import gspread  # Google Sheets bilan ishlash uchun
-import pandas as pd  # Ma'lumotlarni oson qayta ishlash uchun
+import uvicorn
+import gspread
+import pandas as pd
 from fastapi import FastAPI, Query, HTTPException
-from fastapi.middleware.cors import CORSMiddleware  # Turli manzillardan so'rovga ruxsat berish
-from gspread_dataframe import get_as_dataframe  # Google Sheetni DataFramega o'tkazish
+from fastapi.middleware.cors import CORSMiddleware
+from gspread_dataframe import get_as_dataframe
 from contextlib import asynccontextmanager
 import time
 
 # --- O'ZGARUVCHILAR ---
-# Google Sheet faylingizning aniq nomini yozing
 GOOGLE_SHEET_NAME = "Dori Bazasi" 
-# Service account faylingiz nomi
 CREDENTIALS_FILE = "credentials.json" 
-# Qancha vaqt ma'lumotni keshda saqlash (sekundda). 300 sekund = 5 daqiqa
 CACHE_DURATION = 300 
 # --- --- --- --- --- ---
 
-# Global o'zgaruvchilar (kesh uchun)
-db = pd.DataFrame() # Ma'lumotlar bazasi (Pandas DataFrame)
-last_fetched_time = 0 # Oxirgi yuklab olingan vaqt
+db = pd.DataFrame()
+last_fetched_time = 0
 
 def load_data_from_sheet():
-    """
-    Google Sheetdan ma'lumotlarni o'qiydi va `db` global o'zgaruvchisiga yuklaydi.
-    """
     global db, last_fetched_time
     print("Google Sheetdan ma'lumotlar yuklanmoqda...")
     try:
-        # Google bilan bog'lanish
         gc = gspread.service_account(filename=CREDENTIALS_FILE)
-        # Faylni nomi bo'yicha ochish
         sh = gc.open(GOOGLE_SHEET_NAME) 
-        # Birinchi listni (worksheet) olish
         worksheet = sh.get_worksheet(0) 
         
-        # Ma'lumotlarni Pandas DataFramega o'qib olish
-        # 'dtype=str' - barcha ustunlarni matn sifatida o'qish (xatolikni oldini oladi)
         db = get_as_dataframe(worksheet, dtype=str)
-        
-        # NaN (bo'sh) kataklarni bo'sh string '' ga o'zgartirish
         db = db.fillna('') 
         
-        # Qidiruv oson bo'lishi uchun 'Dori Nomi' ustunini kichik harflarga o'tkazish
         if 'Dori Nomi' in db.columns:
             db['Dori Nomi_lower'] = db['Dori Nomi'].str.lower()
         else:
             print("Xatolik: 'Dori Nomi' ustuni topilmadi!")
-            db = pd.DataFrame() # Xatolik bo'lsa bazani bo'shatish
+            db = pd.DataFrame() 
             return
 
-        last_fetched_time = time.time() # Oxirgi yuklanish vaqtini saqlash
+        last_fetched_time = time.time()
         print(f"Muvaffaqiyatli yuklandi. Jami {len(db)} ta qator.")
 
     except Exception as e:
         print(f"Google Sheetga ulanishda xato: {e}")
-        # Agar xato bo'lsa, eski ma'lumotlar bilan ishlashda davom etadi
 
-# FastAPI ilovasi ishga tushganda bir marta ishlaydigan funksiya
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Ilova ishga tushganda...
-    load_data_from_sheet() # Birinchi marta ma'lumotlarni yuklab olamiz
+    load_data_from_sheet()
     yield
-    # Ilova to'xtaganda... (bizga hozircha kerak emas)
     print("Server to'xtamoqda.")
 
-
-# --- API ILovasini Yaratish ---
 app = FastAPI(lifespan=lifespan)
 
-# CORS sozlamalari (Juda muhim!)
-# Bu bizning Mini App (boshqa domenda) APIga so'rov yuborishi uchun kerak.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Hamma manzillarga ruxsat (keyinchalik xavfsizlik uchun faqat Vercel manzilini qo'yamiz)
+    allow_origins=["*"], 
     allow_credentials=True,
-    allow_methods=["*"],  # Hamma metodlarga (GET, POST) ruxsat
+    allow_methods=["*"], 
     allow_headers=["*"],
 )
 
-# --- API Endpoints (Manzillari) ---
-
 @app.get("/")
 async def read_root():
-    """
-    Asosiy manzil. API ishlayotganini tekshirish uchun.
-    """
-    return {"message": "DoriTop API serveri ishlamoqda!"}
+    return {"message": "DoriTop API serveri ishlamoqda! (v2: Saralash bilan - Diagnostika rejimi)"}
 
+# --- O'ZGARTIRILGAN FUNKSIYA (DIAGNOSTIKA PRINTLARI BILAN) ---
 @app.get("/search")
 async def search_dori(q: str = Query(None, min_length=2)):
     """
-    Dorilarni qidirish uchun asosiy manzil.
-    Namuna: /search?q=nospa
+    Dorilarni qidiradi va narx bo'yicha saralaydi. (Diagnostika rejimi)
     """
     global db, last_fetched_time
 
-    # Kesh eskirganligini tekshirish (5 daqiqadan ko'p o'tgan bo'lsa)
     if (time.time() - last_fetched_time) > CACHE_DURATION:
         print("Kesh eskirgan. Ma'lumotlar yangilanmoqda...")
         load_data_from_sheet()
@@ -104,31 +75,58 @@ async def search_dori(q: str = Query(None, min_length=2)):
     if q is None or len(q) < 2:
         raise HTTPException(status_code=400, detail="Qidiruv so'rovi kamida 2 ta belgidan iborat bo'lishi kerak.")
 
-    # Qidiruv so'rovini kichik harfga o'tkazish
     query = q.lower()
     
     if db.empty or 'Dori Nomi_lower' not in db.columns:
         raise HTTPException(status_code=500, detail="Serverda ma'lumotlar bazasi topilmadi yoki xato yuklangan.")
 
     try:
-        # Ma'lumotlar bazasidan (Pandas) qidirish
-        # 'Dori Nomi_lower' ustunida 'query' so'zi qatnashgan qatorlarni topish
-        results_df = db[db['Dori Nomi_lower'].str.contains(query, na=False)]
+        # 1. QIDIRUV
+        results_df = db[db['Dori Nomi_lower'].str.contains(query, na=False)].copy() 
         
-        # 'Dori Nomi_lower' yordamchi ustunini natijadan olib tashlash
-        results_df = results_df.drop(columns=['Dori Nomi_lower'])
+        if results_df.empty:
+            return {"results": []}
 
-        # DataFrame'ni JSON formatiga o'tkazish (ro'yxat ko'rinishida)
+        print(f"--- DIAGNOSTIKA: QIDIRUV: {query} ---")
+        print("Topilgan natijalar (saralashdan oldin):")
+        print(results_df[['Dori Nomi', 'Narxi']])
+
+        # 2. TOZALASH VA O'GIRISH
+        if 'Narxi' in results_df.columns:
+            print("Saralash boshlandi. 'Narxi' ustuni topildi.")
+            
+            # .str.replace() - bu faqat string ma'lumotlar ustida ishlash uchun ishonchliroq
+            results_df['Narxi_numeric'] = results_df['Narxi'].str.replace(r'[^\d]', '', regex=True)
+            print("'Narxi' ustuni raqam bo'lmagan belgilardan tozalandi (Narxi_numeric):")
+            print(results_df['Narxi_numeric'])
+            
+            results_df['Narxi_numeric'] = pd.to_numeric(results_df['Narxi_numeric'], errors='coerce')
+            print("'Narxi_numeric' ustuni raqam formatiga o'girildi (NaN - xato yoki bo'sh):")
+            print(results_df['Narxi_numeric'])
+
+            # 3. SARALASH
+            results_df = results_df.sort_values(by='Narxi_numeric', ascending=True, na_position='last')
+            print("Narx bo'yicha saralandi:")
+            print(results_df[['Dori Nomi', 'Narxi', 'Narxi_numeric']])
+            
+            # 4. YORDAMCHI USTUNLARNI O'CHIRISH
+            results_df = results_df.drop(columns=['Dori Nomi_lower', 'Narxi_numeric'])
+        
+        else:
+            print("DIQQAT: 'Narxi' ustuni topilmadi. Saralash amalga oshirilmadi.")
+            results_df = results_df.drop(columns=['Dori Nomi_lower'])
+
+        # 5. NATIJA
         results_json = results_df.to_dict('records')
         
+        print("--- Qidiruv yakunlandi ---")
         return {"results": results_json}
     
     except Exception as e:
-        print(f"Qidiruvda xato: {e}")
+        print(f"Qidiruvda KATTA XATO: {e}")
         raise HTTPException(status_code=500, detail="Qidiruv jarayonida ichki xatolik yuz berdi.")
 
-# Serverni ishga tushirish
 if __name__ == "__main__":
-    # Bu qism `python main.py` buyrug'i bilan ishga tushurish uchun
     print("Serverni http://127.0.0.1:8000 manzilda ishga tushurish...")
     uvicorn.run(app, host="127.0.0.1", port=8000)
+
