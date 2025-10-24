@@ -221,3 +221,4 @@ if __name__ == "__main__":
     print("Serverni http://127.0.0.1:8000 manzilda ishga tushirish...")
     uvicorn.run(app, host="127.0.0.1", port=8000)
 
+
